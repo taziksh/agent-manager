@@ -78,7 +78,7 @@ type programOutput struct {
 
 func (o *programOutput) Write(p []byte) (int, error) {
 	n, err := o.terminal.Write(p)
-	if bytes.Contains(p, []byte(ansi.SetAltScreenSaveCursorMode)) && o.entries.Add(1) == 2 {
+	if bytes.Contains(p, []byte(ansi.SetModeAltScreenSaveCursor)) && o.entries.Add(1) == 2 {
 		o.restored()
 	}
 	return n, err
@@ -107,8 +107,8 @@ func (r *execRecorder) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (r *execRecorder) View() string { return "" }
 
 var terminalMarks = map[string]string{
-	ansi.SetAltScreenSaveCursorMode:   "enter",
-	ansi.ResetAltScreenSaveCursorMode: "leave",
+	ansi.SetModeAltScreenSaveCursor:   "enter",
+	ansi.ResetModeAltScreenSaveCursor: "leave",
 	ansi.ResetModeLightDark:           "off",
 	ansi.SetModeLightDark:             "on",
 	ansi.RequestLightDarkReport:       "request",
