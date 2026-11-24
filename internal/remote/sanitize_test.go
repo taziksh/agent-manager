@@ -62,7 +62,8 @@ func TestSnapshotIsCleaned(t *testing.T) {
 		{"id":"t2"},
 		{"id":"t3","parent_id":"$(whoami)"},
 		{"id":"t4\n"}],
-	"groups":[{"path":"`+hostile+`","directory":"`+hostile+`","worktree":"`+hostile+`"}]}`)
+	"groups":[{"path":"`+hostile+`","directory":"`+hostile+`","worktree":"`+hostile+`"}],
+	"order":["t2","$(whoami)","a1","","t1"]}`)
 	got, err := c.Snapshot(context.Background(), "gpu")
 	if err != nil {
 		t.Fatal(err)
@@ -77,6 +78,7 @@ func TestSnapshotIsCleaned(t *testing.T) {
 			{ID: "t2"},
 		},
 		Groups: []sessioncmd.Group{{Path: clean, Directory: clean, Worktree: clean}},
+		Order:  []string{"t2", "a1", "t1"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Snapshot =\n%+v\nwant\n%+v", got, want)

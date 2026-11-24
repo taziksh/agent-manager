@@ -28,6 +28,8 @@ const (
 	Rename
 	RenameGroup
 	Move
+	ReorderSession
+	ReorderGroup
 )
 
 type Call struct {
@@ -45,8 +47,12 @@ type Call struct {
 	// takes.
 	Sessions []string
 	// Group is the host's group a move files the session under, empty for
-	// its root.
+	// its root. A reorder's is the group its rows share.
 	Group string
+	// Anchor is the sibling a reorder puts its row right before, or After;
+	// Parent is the agent they share, if they are nested under one.
+	Anchor, Parent string
+	After          bool
 	// ComposerGen and Submission let a send or spawn from the quick bar, or
 	// a spawn from the New Session form, settle what asked for it.
 	ComposerGen    int
@@ -102,11 +108,27 @@ func Run(ctx context.Context, client *remote.Client, openers remote.Openers, cal
 		_, err = client.RenameGroup(ctx, call.Host, call.Name, call.Text)
 	case Move:
 		result.Session, err = client.Move(ctx, call.Ref, call.Group)
+	case ReorderSession:
+		result.Session, err = client.ReorderSession(ctx, call.Ref, call.Anchor, call.After)
+	case ReorderGroup:
+		_, err = client.ReorderGroup(ctx, call.Host, call.Name, call.Anchor, call.After)
 	}
 	return result, err
 }
 
+// Reorders reports whether the call places a row the list already moved.
+func (c Call) Reorders() bool { return c.Op == ReorderSession || c.Op == ReorderGroup }
+
+// Supersedes reports whether the call places the same row as earlier, so a
+// host that has had no other call since needs only this one.
+func (c Call) Supersedes(earlier Call) bool {
+	return c.Reorders() && c.Op == earlier.Op && c.Host == earlier.Host && c.Ref == earlier.Ref && c.Name == earlier.Name
+}
+
 func (s *State) ApplyCall(root Root, call Call, result Result, err error) tea.Cmd {
+	if call.Reorders() {
+		s.ReleaseOrder(call.Host, err == nil)
+	}
 	if err != nil {
 		// As on this machine, a prompt that may sit in the pane stays off
 		// the bar, so the next enter cannot type it a second time.

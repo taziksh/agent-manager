@@ -26,6 +26,8 @@ type Host struct {
 	Groups       []Group
 	Sessions     []Session
 	Terminals    []Session
+	// Order is the host's own order of both, by id. Rows reads it.
+	Order []string
 }
 
 type Group struct {
@@ -42,10 +44,13 @@ type Session struct {
 // changes, so a refresh of a connection since removed or repointed cannot
 // land on the list that replaced it.
 type Connections struct {
-	list    []remote.Connection
-	gen     uint64
-	hosts   map[string]Host
-	polling map[string]bool
+	list  []remote.Connection
+	gen   uint64
+	hosts map[string]Host
+	// polling holds each host whose refresh is in flight, with the count its
+	// order hold was at when the refresh started.
+	polling map[string]uint64
+	holds   map[string]orderHold
 	Preview Preview
 }
 
@@ -62,7 +67,7 @@ func (c *Connections) SetList(list []remote.Connection) {
 		}
 	}
 	c.hosts = kept
-	c.polling = map[string]bool{}
+	c.polling = map[string]uint64{}
 }
 
 // Swap exchanges two connections' places. The hosts are the same, so a
@@ -99,10 +104,11 @@ func (c *Connections) Host(name string) (host Host, seen bool) {
 // StartRefresh claims a refresh of host, unless it is no longer listed,
 // one is already in flight, or it failed and is still resting.
 func (c *Connections) StartRefresh(host string, now time.Time) bool {
-	if _, listed := c.Connection(host); !listed || c.polling[host] || c.resting(host, now) {
+	_, inFlight := c.polling[host]
+	if _, listed := c.Connection(host); !listed || inFlight || c.resting(host, now) {
 		return false
 	}
-	c.polling[host] = true
+	c.polling[host] = c.holds[host].gen
 	return true
 }
 
@@ -112,8 +118,8 @@ func (c *Connections) Refreshed(host string, gen uint64, state Host) bool {
 	if gen != c.gen {
 		return false
 	}
+	c.hosts[host] = c.ordered(host, state, c.polling[host])
 	delete(c.polling, host)
-	c.hosts[host] = state
 	return true
 }
 

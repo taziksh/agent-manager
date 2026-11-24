@@ -403,8 +403,14 @@ func (r renderer) slotContinues(index, slot int) bool {
 }
 
 func (r renderer) rowHandle(row treeRow, selected bool) string {
-	if row.isRoot() || row.host != "" && row.kind != ConnectionRow || r.renaming(row) || r.ctx.MouseDisabled {
+	if row.isRoot() || r.renaming(row) || r.ctx.MouseDisabled {
 		return ""
+	}
+	// A host that is not answering keeps its rows and refuses every change.
+	if row.host != "" && row.kind != ConnectionRow {
+		if host, _ := r.model.host(row.host); host.State != HostOnline {
+			return ""
+		}
 	}
 	style := lipgloss.NewStyle().Foreground(lipgloss.Color(r.palette.restingMark()))
 	if selected {

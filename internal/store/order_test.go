@@ -275,3 +275,129 @@ func TestPlaceSessionBeforeRefusedMovesNothing(t *testing.T) {
 		t.Fatalf("agent moved anyway: %+v err %v", got, err)
 	}
 }
+
+func TestMoveSessionBesideKeepsEveryOtherRowInOrder(t *testing.T) {
+	for _, tc := range []struct {
+		id, anchor string
+		after      bool
+		want       []string
+	}{
+		{"a", "c", true, []string{"hidden", "b", "c", "a", "late"}},
+		{"a", "c", false, []string{"hidden", "b", "a", "c", "late"}},
+		{"late", "a", false, []string{"late", "a", "hidden", "b", "c"}},
+		{"late", "a", true, []string{"a", "late", "hidden", "b", "c"}},
+		{"a", "hidden", true, []string{"hidden", "a", "b", "c", "late"}},
+		{"b", "c", false, []string{"a", "hidden", "b", "c", "late"}},
+	} {
+		st := newTestStore(t)
+		for _, id := range []string{"a", "hidden", "b", "c", "late"} {
+			st.CreateSession(sample(id, "g1"))
+		}
+		st.CreateSession(sample("other", "g2"))
+		st.SetArchived("hidden", true)
+		// Twice, since a call that was cut off may have reached the host.
+		for range 2 {
+			if err := st.MoveSessionBeside(tc.id, tc.anchor, tc.after); err != nil {
+				t.Fatalf("%+v: %v", tc, err)
+			}
+			if got := listIDs(t, st, true); !slices.Equal(got, append(slices.Clone(tc.want), "other")) {
+				t.Fatalf("%+v: order = %v", tc, got)
+			}
+		}
+	}
+}
+
+func TestMoveSessionBesideRefusesARowThatIsNoSibling(t *testing.T) {
+	st := newTestStore(t)
+	for _, id := range []string{"a", "b"} {
+		st.CreateSession(sample(id, "g1"))
+	}
+	st.CreateSession(sample("other", "g2"))
+	nested := sample("nested", "g1")
+	nested.ParentID = "a"
+	st.CreateSession(nested)
+	before := listIDs(t, st, true)
+	for _, pair := range [][2]string{{"a", "other"}, {"a", "nested"}, {"nested", "a"}, {"a", "gone"}, {"gone", "a"}, {"a", "a"}, {"a", ""}, {"", "a"}} {
+		for _, after := range []bool{false, true} {
+			if err := st.MoveSessionBeside(pair[0], pair[1], after); !errors.Is(err, ErrOrderChanged) {
+				t.Errorf("MoveSessionBeside(%v, %v) = %v, want ErrOrderChanged", pair, after, err)
+			}
+		}
+	}
+	if got := listIDs(t, st, true); !slices.Equal(got, before) {
+		t.Fatalf("order = %v, want %v", got, before)
+	}
+}
+
+func groupNames(t *testing.T, st *Store) []string {
+	t.Helper()
+	groups, err := st.Groups()
+	if err != nil {
+		t.Fatalf("groups: %v", err)
+	}
+	names := make([]string, len(groups))
+	for i, group := range groups {
+		names[i] = group.Name
+	}
+	return names
+}
+
+func TestMoveGroupBesideLeavesOtherGroupsInTheirPlaces(t *testing.T) {
+	st := newTestStore(t)
+	for _, path := range []string{"a", "a/x", "b", "a/y", "c"} {
+		st.CreateGroup(path, "")
+	}
+	for _, step := range []struct {
+		path, anchor string
+		after        bool
+		want         []string
+	}{
+		{"c", "a", false, []string{"c", "a/x", "a", "a/y", "b"}},
+		{"a/y", "a/x", false, []string{"c", "a/y", "a", "a/x", "b"}},
+		{"c", "b", true, []string{"a", "a/y", "b", "a/x", "c"}},
+		{"c", "b", true, []string{"a", "a/y", "b", "a/x", "c"}},
+	} {
+		if err := st.MoveGroupBeside(step.path, step.anchor, step.after); err != nil {
+			t.Fatalf("%+v: %v", step, err)
+		}
+		if got := groupNames(t, st); !slices.Equal(got, step.want) {
+			t.Fatalf("%+v: groups = %v", step, got)
+		}
+	}
+}
+
+// A session can outlive its group's row, and its path alone then puts the
+// group in the list, by name after the others. It is a sibling like any, and
+// a move past it keeps the rest where the list showed them.
+func TestMoveGroupBesideCountsAGroupOnlyASessionNames(t *testing.T) {
+	st := newTestStore(t)
+	st.CreateGroup("z", "")
+	for _, group := range []string{"m/deep", "k", "n"} {
+		st.CreateSession(sample("s-"+group, group))
+	}
+	if _, err := st.db.Exec(`DELETE FROM groups WHERE name != 'z'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MoveGroupBeside("z", "m", true); err != nil {
+		t.Fatalf("move: %v", err)
+	}
+	if got := groupNames(t, st); !slices.Equal(got, []string{"k", "m", "z", "n"}) {
+		t.Fatalf("groups = %v", got)
+	}
+}
+
+func TestMoveGroupBesideRefusesAPathThatIsNoSibling(t *testing.T) {
+	st := newTestStore(t)
+	for _, path := range []string{"a", "b", "a/x"} {
+		st.CreateGroup(path, "")
+	}
+	before := groupNames(t, st)
+	for _, pair := range [][2]string{{"a", "a/x"}, {"a/x", "a"}, {"a", "gone"}, {"gone", "a"}, {"a", "a"}, {"a", ""}, {"", "a"}, {"", ""}} {
+		if err := st.MoveGroupBeside(pair[0], pair[1], true); !errors.Is(err, ErrOrderChanged) {
+			t.Errorf("MoveGroupBeside(%v) = %v, want ErrOrderChanged", pair, err)
+		}
+	}
+	if got := groupNames(t, st); !slices.Equal(got, before) {
+		t.Fatalf("groups = %v, want %v", got, before)
+	}
+}

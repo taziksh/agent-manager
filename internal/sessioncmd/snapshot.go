@@ -15,6 +15,9 @@ type Snapshot struct {
 	Sessions     []Session  `json:"sessions"`
 	Terminals    []Terminal `json:"terminals"`
 	Groups       []Group    `json:"groups"`
+	// Order is the id of every session and terminal as this host lists
+	// them, since the two lists above cannot say how they interleave.
+	Order []string `json:"order"`
 }
 
 // Snapshot lists this host's sessions and terminals, archived ones too, from
@@ -55,8 +58,10 @@ func (s *Sessions) Snapshot(sessionID string) (Snapshot, error) {
 		Sessions:     make([]Session, 0),
 		Terminals:    make([]Terminal, 0),
 		Groups:       runtime.groupRows(groups, stored),
+		Order:        make([]string, 0, len(stored)),
 	}
 	for _, sess := range stored {
+		snapshot.Order = append(snapshot.Order, sess.ID)
 		pane, running := panes[sess.ID]
 		if runtime.cfg.Tools[sess.Tool].Shell {
 			snapshot.Terminals = append(snapshot.Terminals, terminalRow(sess, running, names[sess.ParentID], pane.Path))

@@ -1,6 +1,7 @@
 package rail
 
 import (
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -154,33 +155,218 @@ func TestLocalGroupNamedLikeARemotePathFoldsAlone(t *testing.T) {
 	}
 }
 
-func TestRemoteRowsRefuseReorder(t *testing.T) {
-	model := New(nil)
-	model.Reconcile(hostsSnapshot(HostOnline))
-	ctx := KeyContext{ListKeys: keybind.DefaultList()}
-	for _, selection := range []Selection{
-		{Kind: SessionRow, SessionID: "far", Host: "box"},
-		{Kind: GroupRow, Group: "ops", Host: "box"},
-	} {
-		model.Focus(selection)
-		decision := model.Key(runes("K"), Frame{}, ctx)
-		if len(decision.Mutations) != 0 || !strings.Contains(decision.Error, "isn't available on SSH connections yet") {
-			t.Errorf("%+v: decision = %+v", selection, decision)
+// crowdedHost gives a local row and a remote one the same ids, groups and
+// neighbours, so a swap that lost its host would land on the local rows.
+func crowdedHost() Snapshot {
+	rows := func() []Session {
+		return []Session{
+			{ID: "a", Name: "a", Group: "web", Status: "idle"},
+			{ID: "t", Name: "t", Group: "web", IsShell: true, Status: "idle"},
+			{ID: "hidden", Name: "hidden", Group: "web", Archived: true, Status: "dead"},
+			{ID: "b", Name: "b", Group: "web", Status: "idle"},
+			{ID: "n1", Name: "n1", Group: "web", ParentID: "a", IsShell: true, Status: "idle"},
+			{ID: "n2", Name: "n2", Group: "web", ParentID: "a", IsShell: true, Status: "idle"},
+			{ID: "deep", Name: "deep", Group: "implied/deep", Status: "idle"},
 		}
 	}
-	// The last local root session stepping down must not swap with the
-	// remote root session that shares its empty group.
-	model.Focus(Selection{Kind: SessionRow, SessionID: "local"})
-	if decision := model.Key(runes("J"), Frame{}, ctx); len(decision.Mutations) != 0 {
-		t.Errorf("local session swapped across the host boundary: %+v", decision.Mutations)
+	groups := []string{"web", "ops"}
+	return Snapshot{Groups: groups, Sessions: rows(), Hosts: []Host{
+		{Name: "box", State: HostOnline, Groups: groups, Sessions: rows()},
+		{Name: "gpu", State: HostOnline, Groups: groups, Sessions: rows()},
+	}}
+}
+
+func boxIDs(m Model) []string {
+	host, _ := m.host("box")
+	var ids []string
+	for _, session := range host.Sessions {
+		ids = append(ids, session.ID)
 	}
-	model.Focus(Selection{Kind: SessionRow, SessionID: "near", Group: "work"})
-	model.enterReorder(model.rows[model.cursor].key())
+	return ids
+}
+
+func TestReorderKeySwapsARemoteRowWithItsVisibleNeighbour(t *testing.T) {
+	ctx := KeyContext{ListKeys: keybind.DefaultList()}
+	for _, tc := range []struct {
+		name      string
+		selection Selection
+		key       string
+		want      Mutation
+	}{
+		{"an agent past a hidden row", Selection{Kind: SessionRow, SessionID: "t", Group: "web", Host: "box"}, "J",
+			Mutation{Kind: SwapSession, Host: "box", SessionID: "t", TargetID: "b", After: true, OffsetDelta: 1}},
+		{"a terminal above an agent", Selection{Kind: SessionRow, SessionID: "t", Group: "web", Host: "box"}, "K",
+			Mutation{Kind: SwapSession, Host: "box", SessionID: "t", TargetID: "a", OffsetDelta: -1}},
+		{"a nested terminal", Selection{Kind: SessionRow, SessionID: "n1", Group: "web", Host: "box"}, "J",
+			Mutation{Kind: SwapSession, Host: "box", SessionID: "n1", TargetID: "n2", After: true, OffsetDelta: 1}},
+		{"a group", Selection{Kind: GroupRow, Group: "web", Host: "box"}, "J",
+			Mutation{Kind: SwapGroup, Host: "box", Path: "web", TargetPath: "ops", After: true, OffsetDelta: 1, GroupSiblings: []string{"web", "ops", "implied"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			model := New(nil)
+			model.Reconcile(crowdedHost())
+			model.Focus(tc.selection)
+			decision := model.Key(runes(tc.key), Frame{}, ctx)
+			if len(decision.Mutations) != 1 || !reflect.DeepEqual(decision.Mutations[0], tc.want) {
+				t.Fatalf("decision = %+v, want %+v", decision, tc.want)
+			}
+			local := slices.Clone(model.snapshot.Sessions)
+			applied(&model, decision)
+			if !reflect.DeepEqual(model.snapshot.Sessions, local) || !slices.Equal(model.snapshot.Groups, []string{"web", "ops"}) {
+				t.Errorf("a move on box changed the local rows: %v %v", model.snapshot.Sessions, model.snapshot.Groups)
+			}
+			if other, _ := model.host("gpu"); !reflect.DeepEqual(other.Sessions, local) || !slices.Equal(other.Groups, []string{"web", "ops"}) {
+				t.Errorf("a move on box changed gpu: %v %v", other.Sessions, other.Groups)
+			}
+			if selected, _ := model.Selected(); selected != tc.selection {
+				t.Errorf("the cursor left the row it moved: %+v", selected)
+			}
+		})
+	}
+}
+
+func TestRemoteReorderStopsAtItsHost(t *testing.T) {
+	ctx := KeyContext{ListKeys: keybind.DefaultList()}
+	model := New(nil)
+	model.Reconcile(crowdedHost())
+	for _, tc := range []struct {
+		selection Selection
+		key, want string
+	}{
+		{Selection{Kind: SessionRow, SessionID: "a", Group: "web", Host: "box"}, "K", "session already at the top of its level"},
+		{Selection{Kind: SessionRow, SessionID: "b", Group: "web", Host: "box"}, "J", "session already at the bottom of its level"},
+		{Selection{Kind: SessionRow, SessionID: "b", Group: "web"}, "J", "session already at the bottom of its level"},
+		{Selection{Kind: GroupRow, Group: "web", Host: "gpu"}, "K", "group already at the top of its level"},
+		{Selection{Kind: GroupRow, Group: "implied", Host: "box"}, "J", "group already at the bottom of its level"},
+	} {
+		model.Focus(tc.selection)
+		if decision := model.Key(runes(tc.key), Frame{}, ctx); len(decision.Mutations) != 0 || decision.Error != tc.want {
+			t.Errorf("%s on %+v = %+v", tc.key, tc.selection, decision)
+		}
+	}
+}
+
+func TestDraggingARemoteRowStaysAmongItsSiblings(t *testing.T) {
+	model := New(nil)
+	model.Reconcile(crowdedHost())
+	held := Selection{Kind: SessionRow, SessionID: "a", Group: "web", Host: "box"}
+	model.Focus(held)
+	model.enterReorder(held.key())
+	for _, target := range []Selection{
+		{Kind: GroupRow, Group: "ops", Host: "box"}, {Kind: GroupRow, Group: "ops"}, {Kind: ConnectionRow, Host: "gpu"},
+		{Kind: SessionRow, SessionID: "b", Group: "web"}, {Kind: SessionRow, SessionID: "b", Group: "web", Host: "gpu"},
+	} {
+		if drop, ok := model.resolveDrop(target); ok {
+			t.Errorf("a remote row drops on %+v: %+v", target, drop)
+		}
+	}
+	// Past the end of its group it goes to the end, and esc brings it back.
+	applied(&model, Decision{Mutations: model.planDrag(Selection{Kind: GroupRow, Group: "ops", Host: "box"})})
+	if got := boxIDs(model); slices.Index(got, "a") < slices.Index(got, "b") || slices.Index(got, "t") > slices.Index(got, "b") {
+		t.Fatalf("dragged = %v", got)
+	}
+	applied(&model, model.Key(tea.KeyMsg{Type: tea.KeyEsc}, Frame{}, KeyContext{ListKeys: keybind.DefaultList()}))
+	if got := boxIDs(model); !slices.Equal(got, []string{"a", "t", "hidden", "b", "n1", "n2", "deep"}) {
+		t.Fatalf("esc left %v", got)
+	}
+	if model.Reordering() {
+		t.Error("esc kept the row lifted")
+	}
+	local := Selection{Kind: SessionRow, SessionID: "a", Group: "web"}
+	model.Focus(local)
+	model.enterReorder(local.key())
 	if _, ok := model.resolveDrop(Selection{Kind: GroupRow, Group: "ops", Host: "box"}); ok {
 		t.Error("a local session can be dropped into a remote group")
 	}
 	if _, ok := model.resolveDrop(Selection{Kind: ConnectionRow, Host: "box"}); ok {
 		t.Error("a local session can be dropped onto a connection")
+	}
+}
+
+// A hidden row sits between the lifted one and where it goes, so the steps
+// alone would leave the hidden row on the other side.
+func TestEscPutsARemoteRowBackPastAHiddenOne(t *testing.T) {
+	ctx := KeyContext{ListKeys: keybind.DefaultList()}
+	original := []string{"a", "t", "hidden", "b", "n1", "n2", "deep"}
+	for _, tc := range []struct {
+		id    string
+		steps []int
+	}{
+		{"b", []int{-1}}, {"b", []int{-1, -1}}, {"b", []int{-1, 1}}, {"t", []int{1}}, {"a", []int{1, 1}}, {"n1", []int{1}},
+	} {
+		model := New(nil)
+		model.Reconcile(crowdedHost())
+		held := Selection{Kind: SessionRow, SessionID: tc.id, Group: "web", Host: "box"}
+		model.Focus(held)
+		model.enterReorder(held.key())
+		for _, step := range tc.steps {
+			applied(&model, model.stepLifted(step))
+		}
+		decision := model.Key(tea.KeyMsg{Type: tea.KeyEsc}, Frame{}, ctx)
+		if len(decision.Mutations) != 1 {
+			t.Errorf("%+v: esc planned %d moves", tc, len(decision.Mutations))
+		}
+		applied(&model, decision)
+		if got := boxIDs(model); !slices.Equal(got, original) || model.Reordering() {
+			t.Errorf("%+v: esc left %v, still lifted %v", tc, got, model.Reordering())
+		}
+	}
+	snapshot := crowdedHost()
+	snapshot.Hosts[0].Groups = []string{"web", "shelf", "ops"}
+	snapshot.Hosts[0].ArchivedGroups = map[string]bool{"shelf": true}
+	model := New(nil)
+	model.Reconcile(snapshot)
+	held := Selection{Kind: GroupRow, Group: "ops", Host: "box"}
+	model.Focus(held)
+	model.enterReorder(held.key())
+	applied(&model, model.stepLifted(-1))
+	if host, _ := model.host("box"); host.Groups[0] != "ops" {
+		t.Fatalf("groups = %v", host.Groups)
+	}
+	applied(&model, model.Key(tea.KeyMsg{Type: tea.KeyEsc}, Frame{}, ctx))
+	if host, _ := model.host("box"); !slices.Equal(host.Groups[:3], []string{"web", "shelf", "ops"}) {
+		t.Errorf("esc left groups %v", host.Groups)
+	}
+}
+
+// The sibling a row was lifted from beside can leave its group on the host
+// while the row is held. The steps still lead back among the rest.
+func TestEscRetracesTheStepsOnceTheOriginIsNoSibling(t *testing.T) {
+	model := New(nil)
+	model.Reconcile(crowdedHost())
+	held := Selection{Kind: SessionRow, SessionID: "b", Group: "web", Host: "box"}
+	model.Focus(held)
+	model.enterReorder(held.key())
+	applied(&model, model.stepLifted(-1))
+	snapshot := cloneSnapshot(model.snapshot)
+	box := snapshot.Hosts[0].Sessions
+	box[slices.IndexFunc(box, func(session Session) bool { return session.ID == "hidden" })].Group = "ops"
+	model.Reconcile(snapshot)
+	decision := model.Key(tea.KeyMsg{Type: tea.KeyEsc}, Frame{}, KeyContext{ListKeys: keybind.DefaultList()})
+	want := []Mutation{{Kind: SwapSession, Host: "box", SessionID: "b", TargetID: "t", After: true, OffsetDelta: 1, FinishReorder: true}}
+	if !reflect.DeepEqual(decision.Mutations, want) {
+		t.Fatalf("esc planned %+v, want %+v", decision.Mutations, want)
+	}
+	applied(&model, decision)
+	if got := boxIDs(model); !slices.Equal(got, []string{"a", "t", "b", "hidden", "n1", "n2", "deep"}) || model.Reordering() {
+		t.Fatalf("esc left %v, still lifted %v", got, model.Reordering())
+	}
+}
+
+func TestRemoteRowsOfferAGripWhileTheirHostAnswers(t *testing.T) {
+	keys := []string{"rs:box::far", "rs:box::deep", "rs:box::shell", "rg:box::ops"}
+	for state, want := range map[HostState]bool{HostOnline: true, HostOffline: false} {
+		model := New(nil)
+		model.Reconcile(hostsSnapshot(state))
+		frame := model.Render(hostsContext(48, 20), Frame{})
+		for _, key := range keys {
+			if _, grip := frame.Handles[key]; grip != want {
+				t.Errorf("state %d: grip on %s = %v, want %v", state, key, grip, want)
+			}
+		}
+		if _, grip := frame.Handles["c:box"]; !grip {
+			t.Errorf("state %d: the connection itself offers no grip", state)
+		}
 	}
 }
 
@@ -289,9 +475,6 @@ func TestConnectionRowRendersItsLabelAndState(t *testing.T) {
 		}
 		if _, grip := frame.Handles["c:box"]; !grip {
 			t.Errorf("state %d: a connection row offers no reorder grip", tc.state)
-		}
-		if _, grip := frame.Handles["rs:box::far"]; grip {
-			t.Error("a remote session row offers a reorder grip")
 		}
 	}
 }

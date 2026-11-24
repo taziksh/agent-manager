@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"slices"
 	"sync"
 	"testing"
@@ -172,6 +173,21 @@ func TestRailHostsNameTheTrouble(t *testing.T) {
 	}
 	if host.Err == "" {
 		t.Fatal("the host's error was dropped")
+	}
+}
+
+func TestRailHostsListRowsInTheHostsOrder(t *testing.T) {
+	state := listedState(t, &ssh{})
+	state.Refreshed("box", state.Gen(), Facts(remote.HostState{OK: true, Snapshot: sessioncmd.Snapshot{
+		Sessions:  []sessioncmd.Session{{ID: "s1", Tool: "claude"}, {ID: "s2", Tool: "codex"}},
+		Terminals: []sessioncmd.Terminal{{ID: "t1", ParentID: "s1"}},
+		Order:     []string{"s2", "t1", "s1"},
+	}}))
+	want := []uirail.Session{
+		{ID: "s2", Tool: "codex"}, {ID: "t1", Tool: remoteTerminalTool, ParentID: "s1", IsShell: true}, {ID: "s1", Tool: "claude"},
+	}
+	if got := state.RailHosts()[0].Sessions; !reflect.DeepEqual(got, want) {
+		t.Fatalf("sessions = %+v, want %+v", got, want)
 	}
 }
 

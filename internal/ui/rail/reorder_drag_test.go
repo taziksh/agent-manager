@@ -78,3 +78,62 @@ func TestDragEdgeSchedulesTypedAutoscroll(t *testing.T) {
 		t.Fatalf("autoscroll request = %+v", decision.AutoScroll)
 	}
 }
+
+// A lifted row can go under the drag: its agent is deleted, or its host's
+// connection removed. The cursor then rests on another row, which must stay.
+func TestALiftedRowThatIsGoneMovesNoOther(t *testing.T) {
+	rows := func(ids ...string) Snapshot {
+		host := Host{Name: "box", State: HostOnline}
+		for _, id := range ids {
+			host.Sessions = append(host.Sessions, Session{ID: id, Name: id, Tool: "claude"})
+		}
+		return Snapshot{Hosts: []Host{host}}
+	}
+	model := New(nil)
+	model.Reconcile(rows("a", "b", "c", "d", "e"))
+	model.Focus(Selection{Kind: SessionRow, SessionID: "c", Host: "box"})
+	model.enterReorder("rs:box::c")
+	applied(&model, model.stepLifted(-1))
+	model.Reconcile(rows("b", "a", "d", "e"))
+	if mutations := model.planDrag(Selection{Kind: SessionRow, SessionID: "b", Host: "box"}); len(mutations) != 0 {
+		t.Errorf("the drag moved %+v", mutations)
+	}
+	if decision := model.reorderKey(tea.KeyMsg{Type: tea.KeyEsc}, KeyContext{}); len(decision.Mutations) != 0 || model.Reordering() {
+		t.Errorf("esc moved %+v, still lifted %v", decision.Mutations, model.Reordering())
+	}
+}
+
+func TestLiftedAmongNamesTheRowsACallArranged(t *testing.T) {
+	agents := Siblings{Host: "box", Group: "ops"}
+	nested := Siblings{Host: "box", Group: "ops", Parent: "deep"}
+	groups := Siblings{Host: "box", Groups: true}
+	for _, tc := range []struct {
+		lifted Selection
+		want   Siblings
+	}{
+		{Selection{Kind: SessionRow, SessionID: "deep", Group: "ops", Host: "box"}, agents},
+		{Selection{Kind: SessionRow, SessionID: "shell", Group: "ops", Host: "box"}, nested},
+		{Selection{Kind: GroupRow, Group: "ops", Host: "box"}, groups},
+		{Selection{Kind: ConnectionRow, Host: "box"}, Siblings{}},
+		{Selection{Kind: SessionRow, SessionID: "near", Group: "work"}, Siblings{}},
+	} {
+		model := New(nil)
+		model.Reconcile(hostsSnapshot(HostOnline))
+		if model.LiftedAmong(tc.want) {
+			t.Errorf("%+v: among %+v before it was lifted", tc.lifted, tc.want)
+		}
+		model.Focus(tc.lifted)
+		model.enterReorder(tc.lifted.key())
+		for _, siblings := range []Siblings{agents, nested, groups} {
+			other := siblings
+			other.Host = "gpu"
+			if got := model.LiftedAmong(siblings); got != (siblings == tc.want) || model.LiftedAmong(other) {
+				t.Errorf("%+v among %+v = %v", tc.lifted, siblings, got)
+			}
+		}
+		model.EndLift()
+		if model.Reordering() {
+			t.Errorf("%+v is still lifted", tc.lifted)
+		}
+	}
+}

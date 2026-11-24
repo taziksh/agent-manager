@@ -30,6 +30,15 @@ type autoscrollState struct {
 	anchored bool
 }
 
+// reorderOrigin is where a row on a host was lifted from: right before or
+// after target, the sibling next to it, hidden or not. A move puts a row
+// beside the one it passes, so retracing the steps past a hidden row would
+// leave it on the other side.
+type reorderOrigin struct {
+	target string
+	after  bool
+}
+
 type reorderState struct {
 	active     bool
 	lift       int
@@ -37,6 +46,7 @@ type reorderState struct {
 	dragging   bool
 	moved      bool
 	offset     int
+	origin     reorderOrigin
 	drop       *dropTarget
 	autoscroll autoscrollState
 }
@@ -123,16 +133,23 @@ type Mutation struct {
 	Path          string
 	TargetPath    string
 	GroupSiblings []string
-	// Host is the connection a swap moves and TargetHost the one it trades
-	// places with.
-	Host          string
-	TargetHost    string
+	// Host is the connection whose rows a swap moves, empty for this
+	// machine's. For SwapConnection it is the connection that moves, and
+	// TargetHost the one it trades places with.
+	Host       string
+	TargetHost string
+	// After puts a host's row right after its target rather than before it.
+	After         bool
 	Collapsed     []string
 	HostCollapsed []HostFold
 	OffsetDelta   int
 	Refresh       bool
 	FinishReorder bool
 }
+
+// Remote reports whether the mutation changes a host's rows, which that
+// host stores, rather than this machine's list.
+func (m Mutation) Remote() bool { return m.Host != "" && m.Kind != SwapConnection }
 
 type AutoScrollRequest struct {
 	Lift  int

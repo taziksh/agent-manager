@@ -109,7 +109,13 @@ func cleanSnapshot(snapshot sessioncmd.Snapshot) sessioncmd.Snapshot {
 	for i, group := range snapshot.Groups {
 		snapshot.Groups[i] = cleanGroup(group)
 	}
-	snapshot.Sessions, snapshot.Terminals = sessions, terminals
+	order := snapshot.Order[:0]
+	for _, id := range snapshot.Order {
+		if validID(id) == nil {
+			order = append(order, id)
+		}
+	}
+	snapshot.Sessions, snapshot.Terminals, snapshot.Order = sessions, terminals, order
 	return snapshot
 }
 
