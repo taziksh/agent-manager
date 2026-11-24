@@ -46,6 +46,8 @@ type fakeSessions struct {
 	deleted   bool
 	notice    string
 	confirmed []string
+	anchor    string
+	after     bool
 
 	session   sessioncmd.Session
 	wait      sessioncmd.WaitResult
@@ -149,6 +151,16 @@ func (f *fakeSessions) Move(sessionID, targetID, group string) (sessioncmd.Sessi
 	moved := f.session
 	moved.Group = group
 	return moved, f.failWith
+}
+
+func (f *fakeSessions) ReorderSession(sessionID, targetID, anchorID string, after bool) (sessioncmd.Session, error) {
+	f.callerID, f.targetID, f.anchor, f.after = sessionID, targetID, anchorID, after
+	return sessioncmd.Session{ID: targetID}, nil
+}
+
+func (f *fakeSessions) ReorderGroup(sessionID, path, anchor string, after bool) (sessioncmd.Group, error) {
+	f.callerID, f.targetID, f.anchor, f.after = sessionID, path, anchor, after
+	return sessioncmd.Group{Path: path}, nil
 }
 
 func (f *fakeSessions) RenameGroup(sessionID, path, name string) (sessioncmd.Group, error) {
@@ -587,8 +599,8 @@ func TestCommandsThatActAsNoSessionNeverResolveACaller(t *testing.T) {
 func TestCommandsAndHelpCoverEverySection(t *testing.T) {
 	table := Commands("dev", sampleSpecs)
 	registered := []string{
-		"sessions", "snapshot", "spawn", "send", "type", "read", "wait", "message-status", "kill", "delete", "revive", "archive", "move", "rename-session", "archive-self", "kill-self", "prompts", "env",
-		"groups", "create-group", "delete-group", "rename-group", "task", "reserve", "release-files", "reservations", "terminal",
+		"sessions", "snapshot", "spawn", "send", "type", "read", "wait", "message-status", "kill", "delete", "revive", "archive", "move", "rename-session", "reorder-session", "archive-self", "kill-self", "prompts", "env",
+		"groups", "create-group", "delete-group", "rename-group", "reorder-group", "task", "reserve", "release-files", "reservations", "terminal",
 		"rename", "review-repo", "review-base", "review-mode", "review-comment", "issue", "feature", "settings", "hooks", "export", "import", "update",
 	}
 	for _, name := range registered {

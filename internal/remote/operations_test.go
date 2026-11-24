@@ -67,6 +67,14 @@ func TestOperationArgv(t *testing.T) {
 			_, err := c.Type(ctx, ref, text)
 			return err
 		}, []string{"type", "--json", "--", "a1b2c3d4", text}},
+		{"reorder session", func(ctx context.Context, c *Client) error {
+			_, err := c.ReorderSession(ctx, ref, "b2", true)
+			return err
+		}, []string{"reorder-session", "--after=b2", "--json", "--", "a1b2c3d4"}},
+		{"reorder group", func(ctx context.Context, c *Client) error {
+			_, err := c.ReorderGroup(ctx, "gpu", group, "-team/it's b", false)
+			return err
+		}, []string{"reorder-group", "--before=-team/it's b", "--json", "--", "-team/a"}},
 		{"spawn bare", func(ctx context.Context, c *Client) error {
 			_, err := c.Spawn(ctx, "gpu", sessioncmd.CreateSessionOptions{})
 			return err
@@ -202,6 +210,10 @@ func TestUnsafeIDsNeverReachSSH(t *testing.T) {
 		errs = append(errs, err)
 	}
 	_, err = c.Rename(ctx, bad, "work")
+	errs = append(errs, err)
+	_, err = c.ReorderSession(ctx, bad, "a1", true)
+	errs = append(errs, err)
+	_, err = c.ReorderSession(ctx, Ref{Host: "gpu", ID: "a1"}, bad.ID, true)
 	errs = append(errs, err)
 	for i, err := range errs {
 		if err == nil {
@@ -377,6 +389,12 @@ func TestUnknownCommandIsTooOldNotUnreadable(t *testing.T) {
 	}
 	if _, err := c.RenameGroup(context.Background(), "gpu", "web", "api"); err == nil || err.Error() != "gpu: agent-manager there is too old for SSH connections; update agent-manager on that host" {
 		t.Fatalf("rename-group on a host that predates it = %v", err)
+	}
+	if _, err := c.ReorderSession(context.Background(), Ref{Host: "gpu", ID: "a1"}, "b2", true); err == nil || err.Error() != "gpu: agent-manager there is too old for SSH connections; update agent-manager on that host" {
+		t.Fatalf("reorder-session on a host that predates it = %v", err)
+	}
+	if _, err := c.ReorderGroup(context.Background(), "gpu", "a", "b", true); err == nil || err.Error() != "gpu: agent-manager there is too old for SSH connections; update agent-manager on that host" {
+		t.Fatalf("reorder-group on a host that predates it = %v", err)
 	}
 	if _, err := c.Move(context.Background(), Ref{Host: "gpu", ID: "a1"}, "ops"); err == nil || err.Error() != "gpu: agent-manager there is too old for SSH connections; update agent-manager on that host" {
 		t.Fatalf("move on a host that predates it = %v", err)

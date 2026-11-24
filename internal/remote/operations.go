@@ -320,6 +320,29 @@ func (c *Client) RenameGroup(ctx context.Context, host, path, name string) (sess
 	return cleanGroup(renamed), err
 }
 
+// ReorderSession puts an agent or a terminal right before or after a sibling
+// on its host.
+func (c *Client) ReorderSession(ctx context.Context, ref Ref, anchor string, after bool) (sessioncmd.Session, error) {
+	if err := validID(anchor); err != nil {
+		return sessioncmd.Session{}, &Error{Host: ref.Host, Err: err}
+	}
+	return c.lifecycle(ctx, ref, []string{"reorder-session", besideFlag(anchor, after), "--json"})
+}
+
+// ReorderGroup puts a group on host right before or after a sibling.
+func (c *Client) ReorderGroup(ctx context.Context, host, path, anchor string, after bool) (sessioncmd.Group, error) {
+	var moved sessioncmd.Group
+	err := c.decode(ctx, host, callTimeout, &moved, "reorder-group", besideFlag(anchor, after), "--json", "--", path)
+	return cleanGroup(moved), err
+}
+
+func besideFlag(anchor string, after bool) string {
+	if after {
+		return "--after=" + anchor
+	}
+	return "--before=" + anchor
+}
+
 func validRef(ref Ref) error {
 	if err := validID(ref.ID); err != nil {
 		return &Error{Host: ref.Host, Err: err}

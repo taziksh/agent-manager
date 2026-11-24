@@ -6,7 +6,7 @@ runs it with /bin/sh under a second disposable profile, so the manager talks
 to a real agent-manager "host" without a network or the user's ~/.ssh. The
 scenario adds a connection through the dialog and drives every action a
 remote row offers: preview, rename, quick send, move, kill, revive, archive,
-restore, delete, attach, quick spawn, a new terminal, and deleting a group with
+restore, delete, attach, quick spawn, a new terminal, reordering its rows, and deleting a group with
 its agent. A second connection whose host refuses shows as unreachable, is moved
 above the first and back, and is removed. Every process it started is ended by PID.
 """
@@ -40,6 +40,7 @@ GROUPED_AGENT = 'api'
 REMOTE_NEW_GROUP = 'ops'
 GROUP_AGENT = 'ops-agent'
 LATE_AGENT = 'ops-late'
+LATE_TERMINAL = 'late-terminal'
 SWAP_AGENT = 'ops-swap'
 QUICK_TEXT = 'ssh-quick-input'
 SPAWN_TEXT = 'ssh-spawn-prompt'
@@ -362,8 +363,9 @@ def attach(sandbox, remote, agent_id):
     # The remote write can finish before the manager polls its updated roster.
     # Navigating the stale list lets that poll move the selection under attach.
     # The revived fixture prints its marker after start, so it rests on idle or finished by timing.
+    # The drag handle leaves the rail too narrow for the whole word.
     sandbox.wait('remote-restored-row', lambda: capture(sandbox),
-                 lambda value: any(re.search(re.escape(REMOTE_AGENT) + r'\s+(?:idle|finished)\b',
+                 lambda value: any(re.search(re.escape(REMOTE_AGENT) + r'\s+(?:idle|finish(?:ed)?)\b',
                                              line[:RAIL_WIDTH])
                                    for line in value.splitlines()))
     select_remote_agent(sandbox)
@@ -487,6 +489,48 @@ def delete_group(sandbox, remote, manager):
                      lambda code: code != '0')
 
 
+def reorder_remote(sandbox, remote, manager):
+    """K and J move an agent past a terminal, and a group past another, and the host stores the order."""
+    names = {name: session_id for session_id, name, _ in remote.sessions()}
+    terminal = remote.query("SELECT name FROM sessions WHERE tool = 'terminal' AND opened_without_session = 1")[0][0]
+    root = "SELECT name FROM sessions WHERE group_name = '' AND parent_id = '' ORDER BY sort_order, created_at"
+
+    def stored():
+        return [name for (name,) in remote.query(root)]
+
+    def listed():
+        snapshot = json.loads(remote.run(sandbox, [str(manager), 'snapshot', '--json']).stdout)
+        return [row for row in snapshot['order'] if row in (names[REMOTE_AGENT], names[terminal])]
+
+    before = stored()
+    if before.index(REMOTE_AGENT) > before.index(terminal):
+        raise AssertionError(f'want {REMOTE_AGENT} above {terminal} to start with: {before}')
+    select_remote_agent(sandbox)
+    steps = before.index(terminal) - before.index(REMOTE_AGENT)
+    for _ in range(steps):
+        key(sandbox, 'J')
+    after = [name for name in before if name != REMOTE_AGENT]
+    after.insert(before.index(REMOTE_AGENT) + steps, REMOTE_AGENT)
+    sandbox.wait('remote-reorder', lambda: str(stored()), lambda value: value == str(after))
+    if listed() != [names[terminal], names[REMOTE_AGENT]]:
+        raise AssertionError(f'the snapshot does not carry the order: {listed()}')
+    sandbox.wait('remote-reorder-listed', lambda: capture(sandbox), lambda value: rail_order(value, [terminal, REMOTE_AGENT]))
+    # A row the host gained since the last refresh keeps its place and refuses nothing.
+    remote.run(sandbox, [str(manager), 'terminal', 'create', '--json', '--name=' + LATE_TERMINAL, '--group='])
+    before.append(LATE_TERMINAL)
+    for _ in range(steps):
+        key(sandbox, 'K')
+    sandbox.wait('remote-reorder-back', lambda: str(stored()), lambda value: value == str(before))
+    sandbox.wait('remote-reorder-back-listed', lambda: capture(sandbox), lambda value: rail_order(value, [REMOTE_AGENT, terminal]))
+
+    select(sandbox, 'remote-reorder-group', f'{REMOTE_NEW_GROUP}  on {CONNECTION}')
+    for name, step, order in (('remote-group-up', 'K', [REMOTE_NEW_GROUP, RENAMED_GROUP]), ('remote-group-down', 'J', [RENAMED_GROUP, REMOTE_NEW_GROUP])):
+        key(sandbox, step)
+        sandbox.wait(name, lambda: str([path for (path,) in remote.query('SELECT name FROM groups ORDER BY sort_order, name')]),
+                     lambda value, order=order: value == str(order))
+        sandbox.wait(name + '-listed', lambda: capture(sandbox), lambda value, order=order: rail_order(value, order))
+
+
 def reorder_connections(sandbox):
     """K and J move a connection among the others, unreachable or not, since no host is asked."""
     for name, step, order in (('connection-up', 'K', [DOWN, CONNECTION]), ('connection-down', 'J', [CONNECTION, DOWN])):
@@ -560,6 +604,7 @@ def scenario(sandbox, remote, binary):
     attach(sandbox, remote, agent_id)
     left_at_prompt_head(sandbox, remote, agent_id)
     spawn_and_terminal(sandbox, remote)
+    reorder_remote(sandbox, remote, manager)
     delete_group(sandbox, remote, manager)
     offline_connection(sandbox)
     local = sqlite3.connect(str(profile_dir(sandbox) / 'state.db'), timeout=5)

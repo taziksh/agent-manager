@@ -100,7 +100,7 @@ func boundKeys(bound map[string]string) KeyHint {
 // A prompt aimed at a remote row refuses to land when a refresh moved the
 // target, and a local-to-local aim is the root's own business.
 func TestAimLostNamesTheReasonTheAimCannotLand(t *testing.T) {
-	state := &Connections{list: nil, hosts: map[string]Host{}, polling: map[string]bool{}}
+	state := &Connections{list: nil, hosts: map[string]Host{}, polling: map[string]uint64{}}
 	aim := uirail.Selection{Kind: uirail.SessionRow, Host: "box", SessionID: "s1"}
 	if _, lost := state.AimLost(uirail.Selection{Kind: uirail.SessionRow, SessionID: "local"}, uirail.Selection{Kind: uirail.SessionRow, SessionID: "other"}); lost {
 		t.Fatal("a local-to-local aim is the root's to refuse")

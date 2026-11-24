@@ -16,9 +16,6 @@ func (m *Model) requestReorder(delta int) Decision {
 	if row.isRoot() {
 		return Decision{Consumed: true, Error: "root stays at the top of the list"}
 	}
-	if row.host != "" && row.kind != ConnectionRow {
-		return Decision{Consumed: true, Error: RemoteRefusal("reorder")}
-	}
 	request, ok := m.swapRequest(row, delta)
 	if !ok {
 		edge, what := "top", "group"
@@ -47,19 +44,23 @@ func (m Model) swapRequest(row treeRow, delta int) (Mutation, bool) {
 	case GroupRow:
 		return Mutation{
 			Kind:          SwapGroup,
+			Host:          row.host,
 			Path:          row.group,
 			TargetPath:    target.group,
-			GroupSiblings: m.knownGroupSiblings(ParentGroup(row.group)),
+			After:         row.host != "" && delta > 0,
+			GroupSiblings: m.knownGroupSiblings(row.host, ParentGroup(row.group)),
 			OffsetDelta:   delta,
-			Refresh:       true,
+			Refresh:       row.host == "",
 		}, true
 	}
 	return Mutation{
 		Kind:        SwapSession,
+		Host:        row.host,
 		SessionID:   row.sess.ID,
 		TargetID:    target.sess.ID,
+		After:       row.host != "" && delta > 0,
 		OffsetDelta: delta,
-		Refresh:     true,
+		Refresh:     row.host == "",
 	}, true
 }
 
@@ -92,8 +93,13 @@ func (m Model) visibleReorderTarget(row treeRow, delta int) (treeRow, bool) {
 	return treeRow{}, false
 }
 
-func (m Model) knownGroupSiblings(parent string) []string {
-	return append([]string(nil), childIndex(groupClosure(m.snapshot.Groups, m.snapshot.Sessions), m.snapshot.Groups)[parent]...)
+func (m Model) knownGroupSiblings(host, parent string) []string {
+	groups := m.snapshot.Groups
+	if host != "" {
+		remote, _ := m.host(host)
+		groups = remote.Groups
+	}
+	return append([]string(nil), childIndex(groupClosure(groups, m.sessionsOf(host)), groups)[parent]...)
 }
 
 func (m *Model) ApplyMutation(request Mutation, mutationErr error) Decision {
@@ -103,13 +109,8 @@ func (m *Model) ApplyMutation(request Mutation, mutationErr error) Decision {
 	switch request.Kind {
 	case SaveCollapsed:
 		return Decision{Consumed: true}
-	case SwapSession:
-		m.swapSessionLocal(request.SessionID, request.TargetID)
-	case SwapGroup:
-		m.materializeGroupsLocal(request.GroupSiblings)
-		m.swapGroupLocal(request.Path, request.TargetPath)
-	case SwapConnection:
-		m.swapConnectionLocal(request.Host, request.TargetHost)
+	case SwapSession, SwapGroup, SwapConnection:
+		m.swapLocal(request)
 	case PlaceSession, PlaceSessionBefore, MoveGroup:
 		if request.Group != "" && m.collapsed[request.Group] {
 			m.collapsed[request.Group] = false
@@ -131,65 +132,172 @@ func (m *Model) ApplyMutation(request Mutation, mutationErr error) Decision {
 	return Decision{Consumed: true, Refresh: request.Refresh, Selection: selectedOf(m)}
 }
 
-func (m *Model) swapSessionLocal(id, targetID string) {
-	current, target := -1, -1
-	for index, session := range m.snapshot.Sessions {
-		switch session.ID {
-		case id:
-			current = index
-		case targetID:
-			target = index
+// swapLocal makes a swap in the rail's own copy of the rows it names: this
+// machine's, or a host's.
+func (m *Model) swapLocal(request Mutation) {
+	sessions, groups := &m.snapshot.Sessions, &m.snapshot.Groups
+	if request.Kind == SwapConnection {
+		swapItems(m.snapshot.Hosts, func(host Host) string { return host.Name }, request.Host, request.TargetHost)
+		return
+	}
+	if request.Host != "" {
+		index := slices.IndexFunc(m.snapshot.Hosts, func(host Host) bool { return host.Name == request.Host })
+		if index < 0 {
+			return
+		}
+		sessions, groups = &m.snapshot.Hosts[index].Sessions, &m.snapshot.Hosts[index].Groups
+	}
+	sessionID := func(session Session) string { return session.ID }
+	if request.Kind == SwapSession && request.Remote() {
+		*sessions = placeItem(*sessions, sessionID, request.SessionID, request.TargetID, request.After)
+		return
+	}
+	if request.Kind == SwapSession {
+		swapItems(*sessions, sessionID, request.SessionID, request.TargetID)
+		return
+	}
+	for _, path := range request.GroupSiblings {
+		if !slices.Contains(*groups, path) {
+			*groups = append(*groups, path)
 		}
 	}
-	if current >= 0 && target >= 0 {
-		m.snapshot.Sessions[current], m.snapshot.Sessions[target] = m.snapshot.Sessions[target], m.snapshot.Sessions[current]
+	groupPath := func(path string) string { return path }
+	if request.Remote() {
+		*groups = placeItem(*groups, groupPath, request.Path, request.TargetPath, request.After)
+		return
 	}
+	swapItems(*groups, groupPath, request.Path, request.TargetPath)
 }
 
-func (m *Model) materializeGroupsLocal(paths []string) {
-	known := make(map[string]bool, len(m.snapshot.Groups))
-	for _, group := range m.snapshot.Groups {
-		known[group] = true
+func placeItem[T any](items []T, key func(T) string, id, anchor string, after bool) []T {
+	from := slices.IndexFunc(items, func(item T) bool { return key(item) == id })
+	to := slices.IndexFunc(items, func(item T) bool { return key(item) == anchor })
+	if from < 0 || to < 0 || from == to {
+		return items
 	}
-	for _, path := range paths {
-		if !known[path] {
-			m.snapshot.Groups = append(m.snapshot.Groups, path)
-			known[path] = true
-		}
-	}
+	return PlaceBeside(items, from, to, after)
 }
 
-func (m *Model) swapGroupLocal(path, targetPath string) {
-	current, target := -1, -1
-	for index, group := range m.snapshot.Groups {
-		switch group {
-		case path:
-			current = index
-		case targetPath:
-			target = index
-		}
+// PlaceBeside is items with the one at from put right before or after the
+// one at to, which is another.
+func PlaceBeside[T any](items []T, from, to int, after bool) []T {
+	item := items[from]
+	rest := slices.Delete(slices.Clone(items), from, from+1)
+	if from < to {
+		to--
 	}
-	if current >= 0 && target >= 0 {
-		m.snapshot.Groups[current], m.snapshot.Groups[target] = m.snapshot.Groups[target], m.snapshot.Groups[current]
+	if after {
+		to++
 	}
+	return slices.Insert(rest, to, item)
 }
 
-func (m *Model) swapConnectionLocal(name, targetName string) {
-	hosts := m.snapshot.Hosts
-	current := slices.IndexFunc(hosts, func(host Host) bool { return host.Name == name })
-	target := slices.IndexFunc(hosts, func(host Host) bool { return host.Name == targetName })
+func swapItems[T any](items []T, key func(T) string, from, to string) {
+	current := slices.IndexFunc(items, func(item T) bool { return key(item) == from })
+	target := slices.IndexFunc(items, func(item T) bool { return key(item) == to })
 	if current >= 0 && target >= 0 {
-		hosts[current], hosts[target] = hosts[target], hosts[current]
+		items[current], items[target] = items[target], items[current]
 	}
 }
 
 func (m *Model) enterReorder(key string) {
 	m.lifts++
 	m.menu = rowMenu{}
-	m.reorder = reorderState{active: true, lift: m.lifts, key: key, dragging: true}
+	m.reorder = reorderState{active: true, lift: m.lifts, key: key, dragging: true, origin: m.originOf(key)}
+}
+
+// originOf is where the row at key sits among its siblings on its host, and
+// empty for a row of this machine, whose swaps undo themselves.
+func (m Model) originOf(key string) reorderOrigin {
+	index := m.rowIndex(key)
+	if index < 0 || m.rows[index].host == "" || m.rows[index].kind == ConnectionRow {
+		return reorderOrigin{}
+	}
+	row := m.rows[index]
+	id := row.group
+	if row.kind == SessionRow {
+		id = row.sess.ID
+	}
+	siblings := m.siblingsOf(row)
+	at := slices.Index(siblings, id)
+	switch {
+	case at > 0:
+		return reorderOrigin{target: siblings[at-1], after: true}
+	case at == 0 && len(siblings) > 1:
+		return reorderOrigin{target: siblings[1]}
+	}
+	return reorderOrigin{}
+}
+
+// siblingsOf names a session or group row's siblings, itself and the hidden
+// ones included, by id or path.
+func (m Model) siblingsOf(row treeRow) []string {
+	if row.kind == GroupRow {
+		return m.knownGroupSiblings(row.host, ParentGroup(row.group))
+	}
+	var siblings []string
+	for _, session := range m.sessionsOf(row.host) {
+		if session.Group == row.sess.Group && session.ParentID == row.sess.ParentID {
+			siblings = append(siblings, session.ID)
+		}
+	}
+	return siblings
+}
+
+// originStands reports whether the sibling the lifted row was next to is
+// still one, so the row can go back beside it.
+func (m Model) originStands() bool {
+	row, ok := m.row()
+	return ok && m.reorder.origin.target != "" && slices.Contains(m.siblingsOf(row), m.reorder.origin.target)
+}
+
+// undoOnHost puts a lifted row of a host back where it was lifted from.
+func (m Model) undoOnHost() []Mutation {
+	row, ok := m.row()
+	if !ok || !m.reorder.moved || row.key() != m.reorder.key {
+		return nil
+	}
+	request := Mutation{Kind: SwapSession, Host: row.host, SessionID: row.sess.ID, TargetID: m.reorder.origin.target}
+	if row.kind == GroupRow {
+		request = Mutation{
+			Kind: SwapGroup, Host: row.host, Path: row.group, TargetPath: m.reorder.origin.target,
+			GroupSiblings: m.knownGroupSiblings(row.host, ParentGroup(row.group)),
+		}
+	}
+	request.After, request.OffsetDelta, request.FinishReorder = m.reorder.origin.after, -m.reorder.offset, true
+	return []Mutation{request}
 }
 
 func (m *Model) finishReorder() { m.reorder = reorderState{} }
+
+// EndLift drops the lifted row where it is. Its host did not take its last
+// move, is offline, or no longer lists the two rows of the next one as
+// siblings, so the steps esc would undo no longer lead back.
+func (m *Model) EndLift() { m.finishReorder() }
+
+// Siblings names rows a reorder arranges on a host: the groups under Group,
+// or the sessions in it that share a parent.
+type Siblings struct {
+	Host          string
+	Groups        bool
+	Group, Parent string
+}
+
+// LiftedAmong reports whether the lifted row is one of siblings.
+func (m Model) LiftedAmong(siblings Siblings) bool {
+	index := m.rowIndex(m.reorder.key)
+	if index < 0 || m.rows[index].host != siblings.Host {
+		return false
+	}
+	row := m.rows[index]
+	switch row.kind {
+	case GroupRow:
+		return siblings.Groups && ParentGroup(row.group) == siblings.Group
+	case SessionRow:
+		return !siblings.Groups && row.sess.Group == siblings.Group && row.sess.ParentID == siblings.Parent
+	}
+	return false
+}
 
 func (m *Model) reorderKey(msg tea.KeyMsg, ctx KeyContext) Decision {
 	key := keybind.Normalize(msg.String())
@@ -231,6 +339,9 @@ func (m *Model) stepLifted(delta int) Decision {
 }
 
 func (m Model) planUndo() []Mutation {
+	if m.originStands() {
+		return m.undoOnHost()
+	}
 	scratch := m
 	scratch.snapshot = cloneSnapshot(m.snapshot)
 	scratch.rows = append([]treeRow(nil), m.rows...)
@@ -241,7 +352,7 @@ func (m Model) planUndo() []Mutation {
 			delta = 1
 		}
 		row, ok := scratch.row()
-		if !ok {
+		if !ok || row.key() != m.reorder.key {
 			break
 		}
 		request, ok := scratch.swapRequest(row, delta)
@@ -259,15 +370,7 @@ func (m Model) planUndo() []Mutation {
 }
 
 func (m *Model) applyPlannedSwap(request Mutation) {
-	switch request.Kind {
-	case SwapSession:
-		m.swapSessionLocal(request.SessionID, request.TargetID)
-	case SwapConnection:
-		m.swapConnectionLocal(request.Host, request.TargetHost)
-	default:
-		m.materializeGroupsLocal(request.GroupSiblings)
-		m.swapGroupLocal(request.Path, request.TargetPath)
-	}
+	m.swapLocal(request)
 	m.rebuildRows()
 }
 
@@ -279,7 +382,7 @@ func (m Model) planDrag(target Selection) []Mutation {
 	var requests []Mutation
 	for scratch.cursor != targetIndex && len(requests) < len(scratch.rows) {
 		row, ok := scratch.row()
-		if !ok {
+		if !ok || row.key() != m.reorder.key {
 			break
 		}
 		delta := 1

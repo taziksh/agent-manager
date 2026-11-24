@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"flag"
@@ -37,6 +38,8 @@ const (
 	usageCreateGroup   = "create-group <path> [--directory <path>] [--json]"
 	usageDeleteGroup   = "delete-group <path> [--with-sessions=<id,...>] [--json]"
 	usageRenameGroup   = `rename-group <path> "<name>" [--json]`
+	usageReorder       = "reorder-session <session-id> (--before=<session-id> | --after=<session-id>) [--json]"
+	usageReorderGroup  = "reorder-group <path> (--before=<path> | --after=<path>) [--json]"
 )
 
 type sessionCommands interface {
@@ -64,6 +67,8 @@ type sessionCommands interface {
 	DeleteGroup(sessionID, path string) (sessioncmd.GroupRemoval, error)
 	DeleteGroupWithSessions(sessionID, path string, confirmed []string) (sessioncmd.GroupDeletion, error)
 	RenameGroup(sessionID, path, name string) (sessioncmd.Group, error)
+	ReorderSession(sessionID, targetID, anchorID string, after bool) (sessioncmd.Session, error)
+	ReorderGroup(sessionID, path, anchor string, after bool) (sessioncmd.Group, error)
 }
 
 func newSessions(configDir string) sessionCommands {
@@ -120,12 +125,14 @@ func sessionSectionWith(open func(string) sessionCommands) section {
 			{name: "archive", usage: usageArchive, about: "file a finished session out of the active list, or restore it with --restore", run: bind(open, runArchive)},
 			{name: "move", usage: usageMove, about: "file a session under another existing group, the way the move key does; an empty group is the root, and a host::id moves it on that SSH connection", run: bind(func(configDir string) moveLayer { return moveLayer{open(configDir), storedHosts(configDir)} }, runMove)},
 			{name: "rename-session", usage: usageRenameSession, about: "rename an agent or a terminal the way the rename key does, its worktree branch included; only for a caller with no session here, such as a manager on another machine over SSH", run: bind(open, runRenameSession)},
+			{name: "reorder-session", usage: usageReorder, about: "put an agent or a terminal right before or after another in its group, or under its agent, the way the reorder keys do; only for a caller with no session here", run: bind(open, runReorderSession)},
 			{name: "archive-self", usage: usageArchiveSelf, about: "archive this session once the current turn ends, the way the archive key does; --cancel withdraws a pending archive or kill", run: bind(open, runArchiveSelf)},
 			{name: "kill-self", usage: usageKillSelf, about: "stop this session's agent once the current turn ends, keeping its row for revive; --cancel withdraws a pending archive or kill", run: bind(open, runKillSelf)},
 			{name: "groups", usage: usageGroups, about: "list the groups sessions and terminals are filed under", run: bind(open, runGroups)},
 			{name: "create-group", usage: usageCreateGroup, about: "create a group so a fleet you spawn stays together in the user's list", run: bind(open, runCreateGroup)},
 			{name: "delete-group", usage: usageDeleteGroup, about: "remove a group whose work is done; sessions still in it move to the root rather than stopping, unless --with-sessions deletes them with it as the user's delete key does", run: bind(open, runDeleteGroup)},
 			{name: "rename-group", usage: usageRenameGroup, about: "rename a group where it stands, its subgroups and sessions moving with it, the way the edit card's name does; only for a caller with no session here", run: bind(open, runRenameGroup)},
+			{name: "reorder-group", usage: usageReorderGroup, about: "put a group right before or after another under the same parent, the way the reorder keys do; only for a caller with no session here", run: bind(open, runReorderGroup)},
 		},
 	}
 }
@@ -527,4 +534,52 @@ func runRenameGroup(out io.Writer, sessions sessionCommands, args []string, sess
 		return err
 	}
 	return emit(out, *asJSON, renamed, "renamed group "+operands[0]+" to "+renamed.Path)
+}
+
+// besideFlags is where a reorder puts its row: right before or after another.
+func besideFlags(set *flag.FlagSet) func() (anchor string, after bool, err error) {
+	before := set.String("before", "", "the row to put it right before")
+	after := set.String("after", "", "the row to put it right after")
+	return func() (string, bool, error) {
+		if (*before == "") == (*after == "") {
+			return "", false, usageError(set.Name())
+		}
+		return cmp.Or(*before, *after), *after != "", nil
+	}
+}
+
+func runReorderSession(out io.Writer, sessions sessionCommands, args []string, sessionID string) error {
+	set := newFlagSet(usageReorder)
+	asJSON, beside := jsonFlag(set), besideFlags(set)
+	operands, err := parseCommand(out, set, args, 1, 1)
+	if err != nil {
+		return err
+	}
+	anchor, after, err := beside()
+	if err != nil {
+		return err
+	}
+	moved, err := sessions.ReorderSession(sessionID, operands[0], anchor, after)
+	if err != nil {
+		return err
+	}
+	return emit(out, *asJSON, moved, "reordered "+sessioncmd.FormatSession(moved))
+}
+
+func runReorderGroup(out io.Writer, sessions sessionCommands, args []string, sessionID string) error {
+	set := newFlagSet(usageReorderGroup)
+	asJSON, beside := jsonFlag(set), besideFlags(set)
+	operands, err := parseCommand(out, set, args, 1, 1)
+	if err != nil {
+		return err
+	}
+	anchor, after, err := beside()
+	if err != nil {
+		return err
+	}
+	moved, err := sessions.ReorderGroup(sessionID, operands[0], anchor, after)
+	if err != nil {
+		return err
+	}
+	return emit(out, *asJSON, moved, "reordered group "+moved.Path)
 }

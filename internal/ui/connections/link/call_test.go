@@ -23,16 +23,46 @@ func TestRunTurnsEachCallIntoItsHostCommand(t *testing.T) {
 		{Rename, []string{"rename-session", "--json", "--", "s1", "hello"}},
 		{RenameGroup, []string{"rename-group", "--json", "--", "api", "hello"}},
 		{Move, []string{"move", "--json", "--", "s1", "ops"}},
+		{ReorderSession, []string{"reorder-session", "--after=s2", "--json", "--", "s1"}},
+		{ReorderGroup, []string{"reorder-group", "--after=s2", "--json", "--", "api"}},
 	} {
 		fake := &ssh{}
 		client := listedState(t, fake).Client
-		call := Call{Op: tc.op, Host: "box", Ref: remote.Ref{Host: "box", ID: "s1"}, Name: "api", Text: "hello", Group: "ops"}
+		call := Call{Op: tc.op, Host: "box", Ref: remote.Ref{Host: "box", ID: "s1"}, Name: "api", Text: "hello", Group: "ops", Anchor: "s2", After: true}
 		if _, err := Run(context.Background(), client, nil, call); err != nil {
 			t.Fatalf("%v: %v", tc.op, err)
 		}
 		if calls := fake.taken(); len(calls) != 1 || !equal(calls[0], tc.want) {
 			t.Fatalf("%v: calls %q, want %q", tc.op, calls, tc.want)
 		}
+	}
+}
+
+// A move replaces an earlier one only of the same row on the same host.
+func TestAMoveSupersedesOnlyOneOfTheSameRow(t *testing.T) {
+	session := Call{Op: ReorderSession, Host: "box", Ref: remote.Ref{Host: "box", ID: "s1"}, Anchor: "a", After: true}
+	group := Call{Op: ReorderGroup, Host: "box", Name: "web", Anchor: "ops"}
+	for _, call := range []Call{session, group} {
+		earlier := call
+		earlier.Anchor, earlier.After = "b", !call.After
+		if !call.Supersedes(earlier) {
+			t.Errorf("%+v left an earlier move of its row to be sent", call)
+		}
+		for name, change := range map[string]func(*Call){
+			"another host":  func(c *Call) { c.Host = "gpu" },
+			"another row":   func(c *Call) { c.Ref.ID = "s2" },
+			"another group": func(c *Call) { c.Name = "ops" },
+			"another call":  func(c *Call) { c.Op = Move },
+		} {
+			other := call
+			change(&other)
+			if call.Supersedes(other) {
+				t.Errorf("%s: superseded", name)
+			}
+		}
+	}
+	if move := (Call{Op: Move, Host: "box", Group: "web"}); move.Supersedes(move) {
+		t.Error("a move to a group superseded one")
 	}
 }
 

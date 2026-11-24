@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -475,6 +476,35 @@ func TestRenameGroupReachesTheLayerWithItsName(t *testing.T) {
 	}
 	if err := runRenameGroup(&bytes.Buffer{}, &fakeSessions{}, []string{"web"}, ""); err == nil || err.Error() != "usage: agent-manager "+usageRenameGroup {
 		t.Fatalf("rename-group without a name = %v, want the usage", err)
+	}
+}
+
+// The SSH client's form: the row after a bare -- and its anchor in a flag, so
+// a path that starts with a dash stays a path.
+func TestReorderReachesTheLayerWithItsAnchor(t *testing.T) {
+	for _, tc := range []struct {
+		run         func(io.Writer, sessionCommands, []string, string) error
+		row, anchor string
+		usage       string
+	}{
+		{runReorderSession, "beef1234", "cafe5678", usageReorder},
+		{runReorderGroup, "-team/a", "-team/b c", usageReorderGroup},
+	} {
+		for flag, after := range map[string]bool{"--before=": false, "--after=": true} {
+			out := &bytes.Buffer{}
+			fake := &fakeSessions{}
+			if err := tc.run(out, fake, []string{"--json", flag + tc.anchor, "--", tc.row}, ""); err != nil {
+				t.Fatalf("%s: %v", tc.usage, err)
+			}
+			if fake.targetID != tc.row || fake.anchor != tc.anchor || fake.after != after || !json.Valid(out.Bytes()) {
+				t.Errorf("%s%s reached the layer as %q beside %q after %v, printed %q", flag, tc.anchor, fake.targetID, fake.anchor, fake.after, out.String())
+			}
+		}
+		for _, args := range [][]string{nil, {"--", tc.row}, {"--before=x"}, {"--before=x", "--after=y", "--", tc.row}, {"--before=", "--", tc.row}, {"--before=x", "--", tc.row, "more"}} {
+			if err := tc.run(&bytes.Buffer{}, &fakeSessions{}, args, ""); err == nil || err.Error() != "usage: agent-manager "+tc.usage {
+				t.Errorf("%q = %v, want the usage", args, err)
+			}
+		}
 	}
 }
 

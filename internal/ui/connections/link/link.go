@@ -106,17 +106,15 @@ func (s *State) RailHosts() []uirail.Host {
 				host.ArchivedGroups[group.Path] = true
 			}
 		}
-		for _, sess := range state.Sessions {
+		for _, row := range state.Rows() {
+			tool := row.Tool
+			if row.Terminal {
+				tool = remoteTerminalTool
+			}
 			host.Sessions = append(host.Sessions, uirail.Session{
-				ID: sess.ID, Name: sess.Name, Tool: sess.Tool, Cwd: sess.Directory,
-				Group: sess.Group, Status: sess.Status, Archived: sess.Archived,
-			})
-		}
-		for _, term := range state.Terminals {
-			host.Sessions = append(host.Sessions, uirail.Session{
-				ID: term.ID, Name: term.Name, Tool: remoteTerminalTool, Cwd: term.Directory,
-				Group: term.Group, Status: term.Status, Archived: term.Archived,
-				ParentID: term.ParentID, IsShell: true,
+				ID: row.ID, Name: row.Name, Tool: tool, Cwd: row.Directory,
+				Group: row.Group, Status: row.Status, Archived: row.Archived,
+				ParentID: row.ParentID, IsShell: row.Terminal,
 			})
 		}
 		hosts = append(hosts, host)
@@ -127,7 +125,7 @@ func (s *State) RailHosts() []uirail.Host {
 func Facts(state remote.HostState) uiconnections.Host {
 	host := uiconnections.Host{
 		OK: state.OK, Failures: state.Failures, Attempted: state.Attempted,
-		ManagerAwake: state.Snapshot.ManagerAwake,
+		ManagerAwake: state.Snapshot.ManagerAwake, Order: state.Snapshot.Order,
 	}
 	if state.Err != nil {
 		host.Err, host.Trouble = state.Err.Error(), remote.TroubleOf(state.Err)

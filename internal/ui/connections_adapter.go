@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/YoanWai/agent-manager/internal/catalog"
@@ -471,4 +472,75 @@ func remoteCall(host string, ref remote.Ref, name string) uilink.Call {
 // newTerminalCall opens a terminal in a connection's group.
 func newTerminalCall(host, group string) uilink.Call {
 	return uilink.Call{Op: uilink.NewTerminal, Host: host, Terminal: sessioncmd.CreateTerminalOptions{Group: &group}}
+}
+
+// reorderRemote makes the moves among mutations that are on a connection's
+// rows, and returns the rest. The list shows a move at once, and the host is
+// sent the order it leaves.
+func (m *Model) reorderRemote(mutations []uirail.Mutation) []uirail.Mutation {
+	var local []uirail.Mutation
+	for _, mutation := range mutations {
+		if !mutation.Remote() {
+			local = append(local, mutation)
+			continue
+		}
+		if refusal, offline := m.ssh.Offline(mutation.Host); offline {
+			m.rail.EndLift()
+			m.reportErr(refusal)
+			return local
+		}
+		call, ok := m.remoteReorder(mutation)
+		if !ok {
+			m.rail.EndLift()
+			continue
+		}
+		m.rail.ApplyMutation(mutation, nil)
+		m.queueReorder(call)
+	}
+	if len(local) < len(mutations) {
+		m.rebuildRows()
+	}
+	return local
+}
+
+// remoteReorder moves the row in what the host last listed and returns the
+// call that tells it. A swap puts the row just past the one it traded with.
+func (m *Model) remoteReorder(mutation uirail.Mutation) (uilink.Call, bool) {
+	call := uilink.Call{Host: mutation.Host, After: mutation.After}
+	if mutation.Kind == uirail.SwapGroup {
+		call.Op, call.Name, call.Anchor, call.Group = uilink.ReorderGroup, mutation.Path, mutation.TargetPath, uirail.ParentGroup(mutation.Path)
+		return call, m.ssh.PlaceGroup(call.Host, call.Name, call.Anchor, call.After, mutation.GroupSiblings)
+	}
+	call.Op, call.Anchor = uilink.ReorderSession, mutation.TargetID
+	call.Ref = remote.Ref{Host: mutation.Host, ID: mutation.SessionID}
+	var ok bool
+	call.Group, call.Parent, ok = m.ssh.PlaceSession(call.Host, call.Ref.ID, call.Anchor, call.After)
+	return call, ok
+}
+
+// queueReorder sends a move to its host in place of an earlier one of the
+// same row that has not left yet, so a held key costs one call at a time.
+func (m *Model) queueReorder(call uilink.Call) {
+	if m.effects.Quitting {
+		return
+	}
+	lane := &m.effects.Remote
+	if earlier, ok := m.supersededReorder(call); ok {
+		lane.Pending = slices.Delete(lane.Pending, earlier, earlier+1)
+	} else {
+		m.ssh.HoldOrder(call.Host)
+	}
+	m.enqueueEffect(call, 0, false)
+}
+
+// supersededReorder finds the waiting move call replaces: the host's last
+// call, since any made after it may lean on where it put the row.
+func (m *Model) supersededReorder(call uilink.Call) (int, bool) {
+	pending := m.effects.Remote.Pending
+	for i := len(pending) - 1; i >= 0; i-- {
+		if last, ok := pending[i].Request.(uilink.Call); ok && last.Host == call.Host {
+			return i, call.Supersedes(last)
+		}
+	}
+	return 0, false
 }

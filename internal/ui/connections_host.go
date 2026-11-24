@@ -241,5 +241,10 @@ func (m *Model) applyConnectionSave(request uilink.SaveRequest, connections []st
 // applyRemoteCall hands what a call left to the runtime, which reports it and
 // picks the host up again.
 func (m *Model) applyRemoteCall(request uilink.Call, result uilink.Result, err error) tea.Cmd {
+	if err != nil && request.Reorders() && m.rail.LiftedAmong(uirail.Siblings{
+		Host: request.Host, Groups: request.Op == uilink.ReorderGroup, Group: request.Group, Parent: request.Parent,
+	}) {
+		m.rail.EndLift()
+	}
 	return m.ssh.ApplyCall(linkRoot{m}, request, result, err)
 }

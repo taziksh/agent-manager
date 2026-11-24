@@ -390,6 +390,7 @@ func (m *Model) applyRailDecision(decision uirail.Decision) (tea.Model, tea.Cmd)
 		}
 		commands = append(commands, m.syncRemotePreview())
 	}
+	decision.Mutations = m.reorderRemote(decision.Mutations)
 	dependent := false
 	for _, mutation := range decision.Mutations {
 		if mutation.Kind != uirail.SaveCollapsed {
